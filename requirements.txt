@@ -1,0 +1,9 @@
+torch
+torchvision
+transformers
+faiss-cpu
+opencv-python
+gradio
+pillow
+faiss-cpu
+tqdm
