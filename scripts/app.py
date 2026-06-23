@@ -1,316 +1,522 @@
-import os, sys, json, gc, re, threading, http.server, socketserver
+import io
+import re
+import random
+import contextlib
 from pathlib import Path
 
-os.environ["KMP_DUPLICATE_LIB_OK"]  = "TRUE"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["OMP_NUM_THREADS"]        = "1"
-
-LAVILA_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "LaViLa"
-)
-if LAVILA_ROOT not in sys.path:
-    sys.path.insert(0, LAVILA_ROOT)
-
 import streamlit as st
-import numpy as np
-import faiss
-import torch
 from PIL import Image
-from transformers import CLIPTokenizer
 
-torch.set_num_threads(1)
-faiss.omp_set_num_threads(1)
+import memory_qa as mq
 
-st.set_page_config(page_title="Lifelog Memory Search", page_icon="🧠",
-                   layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="Lifelog Memory QA",
+    page_icon="🧠",
+    layout="wide"
+)
 
+# -----------------------------
+# CSS
+# -----------------------------
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
-:root{--bg:#0a0a0f;--surface:#12121a;--surface2:#1c1c28;--border:#2a2a3d;
-      --accent:#7c6af7;--accent2:#4ecdc4;--text:#e8e8f0;--text-dim:#6b6b8a;}
-html,body,.stApp{background-color:var(--bg)!important;color:var(--text)!important;font-family:'DM Sans',sans-serif;}
-#MainMenu,footer,header{visibility:hidden;}
-.block-container{padding:2rem 3rem;max-width:1400px;}
-.hero{text-align:center;padding:3rem 0 2rem;border-bottom:1px solid var(--border);margin-bottom:2.5rem;}
-.hero-title{font-family:'Space Mono',monospace;font-size:2.8rem;font-weight:700;
-            background:linear-gradient(135deg,var(--accent),var(--accent2));
-            -webkit-background-clip:text;-webkit-text-fill-color:transparent;margin:0;}
-.hero-sub{color:var(--text-dim);font-family:'Space Mono',monospace;font-size:0.75rem;
-          text-transform:uppercase;letter-spacing:0.05em;margin-top:0.5rem;}
-.stTextInput input{background:var(--surface)!important;border:1px solid var(--border)!important;
-                   border-radius:12px!important;color:var(--text)!important;
-                   font-size:1.1rem!important;padding:1rem 1.5rem!important;}
-.stTextInput input:focus{border-color:var(--accent)!important;
-                         box-shadow:0 0 0 3px rgba(124,106,247,0.15)!important;}
-.stButton button{background:linear-gradient(135deg,var(--accent),#5b4fe0)!important;
-                 color:white!important;border:none!important;border-radius:10px!important;
-                 font-weight:600!important;font-size:1rem!important;
-                 padding:0.7rem 2rem!important;width:100%!important;}
-.result-card{background:var(--surface);border:1px solid var(--border);
-             border-radius:16px;padding:1.5rem;margin-bottom:0.5rem;}
-.result-card:hover{border-color:var(--accent);}
-.rank-badge{font-family:'Space Mono',monospace;font-size:0.7rem;color:var(--accent);
-            border:1px solid var(--accent);border-radius:6px;padding:0.1rem 0.5rem;
-            margin-bottom:0.75rem;display:inline-block;}
-.session-label{font-family:'Space Mono',monospace;font-size:1rem;font-weight:700;margin-bottom:0.3rem;}
-.timestamp-label{font-family:'Space Mono',monospace;font-size:0.9rem;color:var(--accent2);margin-bottom:0.2rem;}
-.duration-label{font-size:0.85rem;color:var(--text-dim);margin-bottom:0.75rem;}
-.score-bar-bg{background:var(--surface2);border-radius:4px;height:4px;width:100%;margin-top:0.5rem;}
-.score-bar-fill{height:4px;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent2));}
-.score-text{font-family:'Space Mono',monospace;font-size:0.7rem;color:var(--text-dim);margin-top:0.3rem;}
-.expansion-pill{display:inline-block;background:var(--surface2);border:1px solid var(--border);
-                border-radius:20px;padding:0.2rem 0.75rem;font-size:0.8rem;
-                color:var(--text-dim);margin:0.2rem;font-family:'Space Mono',monospace;}
-.no-results{text-align:center;padding:3rem;color:var(--text-dim);font-family:'Space Mono',monospace;}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+html, body, .stApp {
+    background: linear-gradient(135deg, #f8fafc 0%, #eef4f2 45%, #f7f3ee 100%);
+    font-family: 'Inter', sans-serif;
+    color: #1f2937;
+}
+
+.block-container {
+    padding-top: 2.2rem;
+    max-width: 1220px;
+}
+
+.hero {
+    background: rgba(255,255,255,0.78);
+    border: 1px solid rgba(226,232,240,0.9);
+    border-radius: 28px;
+    padding: 2.2rem;
+    box-shadow: 0 20px 55px rgba(31,41,55,0.08);
+    backdrop-filter: blur(18px);
+    margin-bottom: 1.6rem;
+}
+
+.hero-title {
+    font-size: 3rem;
+    line-height: 1.05;
+    font-weight: 800;
+    letter-spacing: -0.055em;
+    color: #172033;
+    margin-bottom: 0.7rem;
+}
+
+.hero-subtitle {
+    font-size: 1.05rem;
+    color: #667085;
+    max-width: 740px;
+    line-height: 1.65;
+}
+
+.tech-pill {
+    display: inline-block;
+    padding: 0.38rem 0.72rem;
+    background: #eef6f4;
+    color: #245b53;
+    border: 1px solid #d7ebe7;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-right: 0.35rem;
+    margin-top: 0.8rem;
+}
+
+.stat-card {
+    background: rgba(255,255,255,0.82);
+    border: 1px solid #e5e7eb;
+    border-radius: 22px;
+    padding: 1.15rem 1rem;
+    box-shadow: 0 12px 30px rgba(31,41,55,0.055);
+    transition: all 0.22s ease;
+}
+
+.stat-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 18px 38px rgba(31,41,55,0.095);
+}
+
+.stat-number {
+    font-size: 1.65rem;
+    font-weight: 800;
+    color: #1f2937;
+}
+
+.stat-label {
+    color: #7a8494;
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+
+.search-panel {
+    background: rgba(255,255,255,0.86);
+    border: 1px solid #e5e7eb;
+    border-radius: 24px;
+    padding: 1.45rem;
+    margin-top: 1.4rem;
+    box-shadow: 0 14px 40px rgba(31,41,55,0.065);
+}
+
+.example-chip {
+    display: inline-block;
+    background: #ffffff;
+    border: 1px solid #dfe7ef;
+    color: #465366;
+    border-radius: 999px;
+    padding: 0.5rem 0.82rem;
+    margin: 0.25rem 0.2rem;
+    font-size: 0.86rem;
+    font-weight: 500;
+    box-shadow: 0 4px 12px rgba(31,41,55,0.035);
+    transition: all 0.2s ease;
+}
+
+.example-chip:hover {
+    transform: translateY(-2px) scale(1.01);
+    border-color: #a7c8c1;
+    color: #245b53;
+    box-shadow: 0 10px 22px rgba(31,41,55,0.08);
+}
+
+.answer-card {
+    background: rgba(255,255,255,0.9);
+    border: 1px solid #e5e7eb;
+    border-left: 5px solid #7aa69e;
+    border-radius: 24px;
+    padding: 1.6rem 1.8rem;
+    box-shadow: 0 16px 42px rgba(31,41,55,0.075);
+    margin-top: 1.4rem;
+}
+
+.answer-title {
+    font-size: 1.25rem;
+    font-weight: 760;
+    color: #1f2937;
+    margin-bottom: 0.75rem;
+}
+
+.answer-text {
+    white-space: pre-wrap;
+    line-height: 1.72;
+    color: #3f4754;
+    font-size: 0.98rem;
+}
+
+.intent-badge {
+    display: inline-block;
+    padding: 0.34rem 0.65rem;
+    border-radius: 999px;
+    background: #f0f7f5;
+    color: #2f615b;
+    border: 1px solid #d5ebe6;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.7rem;
+}
+
+.event-card {
+    background: rgba(255,255,255,0.92);
+    border: 1px solid #e5e7eb;
+    border-radius: 24px;
+    overflow: hidden;
+    box-shadow: 0 14px 36px rgba(31,41,55,0.075);
+    margin-bottom: 1.3rem;
+    transition: all 0.24s ease;
+}
+
+.event-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 22px 48px rgba(31,41,55,0.12);
+    border-color: #bdd8d2;
+}
+
+.event-inner {
+    padding: 1.05rem 1.15rem 1.2rem;
+}
+
+.event-rank {
+    color: #2f615b;
+    background: #eff8f6;
+    border: 1px solid #d6ebe6;
+    border-radius: 999px;
+    padding: 0.26rem 0.55rem;
+    font-size: 0.74rem;
+    font-weight: 750;
+}
+
+.event-title {
+    font-size: 1.02rem;
+    font-weight: 760;
+    color: #1f2937;
+    margin-top: 0.75rem;
+}
+
+.meta {
+    color: #6b7280;
+    font-size: 0.86rem;
+    margin-top: 0.2rem;
+}
+
+.auto-caption {
+    color: #485466;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    margin-top: 0.7rem;
+}
+
+.score {
+    margin-top: 0.65rem;
+    font-size: 0.8rem;
+    color: #7a8494;
+}
+
+div[data-testid="stTextInput"] input {
+    border-radius: 18px;
+    border: 1px solid #d6dee8;
+    padding: 0.95rem 1rem;
+    font-size: 1rem;
+    background: #ffffff;
+}
+
+div[data-testid="stTextInput"] input:focus {
+    border-color: #7aa69e;
+    box-shadow: 0 0 0 4px rgba(122,166,158,0.14);
+}
+
+.stButton > button {
+    border-radius: 16px;
+    padding: 0.72rem 1.25rem;
+    font-weight: 700;
+    border: none;
+    background: linear-gradient(135deg, #52796f, #6fa89d);
+    color: white;
+    transition: all 0.2s ease;
+}
+
+.stButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 28px rgba(82,121,111,0.22);
+    background: linear-gradient(135deg, #456b63, #619a90);
+}
+
+img {
+    border-radius: 18px;
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+img:hover {
+    transform: scale(1.015);
+    box-shadow: 0 18px 38px rgba(31,41,55,0.16);
+}
+
+.section-title {
+    font-size: 1.35rem;
+    font-weight: 780;
+    color: #1f2937;
+    margin: 1.8rem 0 0.9rem;
+}
+
+.footer-note {
+    color: #8a94a3;
+    font-size: 0.82rem;
+    margin-top: 2rem;
+    text-align: center;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# ── VIDEO FILE SERVER ─────────────────────────────────────────────────────────
-VIDEO_SERVER_PORT = 8502
+# -----------------------------
+# Helpers
+# -----------------------------
+def clean_answer(raw_output: str) -> str:
+    if "── Answer" in raw_output:
+        raw_output = raw_output.split("── Answer")[-1]
 
-def start_video_server():
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=os.path.abspath("."), **kwargs)
-        def log_message(self, *args): pass  # suppress logs
-    try:
-        with socketserver.TCPServer(("", VIDEO_SERVER_PORT), Handler) as httpd:
-            httpd.serve_forever()
-    except OSError:
-        pass  # already running
+    raw_output = re.sub(r"─+", "", raw_output).strip()
 
-if "video_server_started" not in st.session_state:
-    threading.Thread(target=start_video_server, daemon=True).start()
-    st.session_state.video_server_started = True
+    lines = []
+    keep = False
 
-# ── SESSION STATE ─────────────────────────────────────────────────────────────
-if "results"     not in st.session_state: st.session_state.results     = []
-if "narrations"  not in st.session_state: st.session_state.narrations  = []
-if "last_query"  not in st.session_state: st.session_state.last_query  = ""
-if "show_videos" not in st.session_state: st.session_state.show_videos = set()
+    for line in raw_output.splitlines():
+        stripped = line.strip()
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-def get_video_url(session: str):
-    participant = session.split("_")[0]
-    rel = f"epic_data/EPIC-KITCHENS/{participant}/videos/{session}.MP4"
-    return f"http://localhost:{VIDEO_SERVER_PORT}/{rel}" if Path(rel).exists() else None
+        if not stripped:
+            if keep:
+                lines.append("")
+            continue
 
-# ── LOAD SYSTEM ───────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Loading memory system...")
-def load_system():
-    from lavila.models import models as lavila_models
-    DEVICE = "cpu"; NUM_FRAMES = 4
+        if (
+            stripped.startswith("Based on")
+            or stripped.startswith("According to")
+            or stripped.startswith("Here")
+            or stripped.startswith("The")
+            or stripped.startswith("*")
+            or re.match(r"^\d+\.", stripped)
+        ):
+            keep = True
 
-    tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-    ckpt = torch.load("pretrained/lavila_tsf_base_ep5.pth", map_location="cpu")
-    sd   = {k.replace("module.", ""): v for k, v in ckpt["state_dict"].items()}
-    model = lavila_models.CLIP_OPENAI_TIMESFORMER_BASE(num_frames=NUM_FRAMES)
-    model.load_state_dict(sd, strict=False)
-    model.eval()
-    del ckpt; gc.collect()
+        if keep:
+            lines.append(line)
 
-    emb = np.load("data/frame_embeddings.npy").astype("float32")
-    with open("data/frame_paths.txt") as f:
-        paths = [l.strip() for l in f if l.strip()]
-    mean_vec = np.load("data/frame_mean.npy").astype("float32")
-    emb = emb - mean_vec
-    faiss.normalize_L2(emb)
-    idx = faiss.IndexFlatIP(emb.shape[1])
-    idx.add(emb)
+    cleaned = "\n".join(lines).strip()
+    return cleaned if cleaned else raw_output
 
-    with open("data/events.json") as f: events = json.load(f)
-    f2e = {}
-    for ev in events:
-        for fp in ev["frame_paths"]:
-            f2e[(ev["session"], int(Path(fp).stem.split("_")[1]))] = ev
 
-    with open("data/session_timestamps.json") as f: ts = json.load(f)
-    return dict(model=model, tokenizer=tokenizer, index=idx, paths=paths,
-                mean_vec=mean_vec, events=events, f2e=f2e, ts=ts, device=DEVICE)
+def run_query(question):
+    intent = mq.classify_intent(question)
+    buffer = io.StringIO()
 
-# ── QUERY EXPANSION ───────────────────────────────────────────────────────────
-RULES = [
-    (["fridge","refrigerator"],
-     ["open the fridge","take food out of the fridge","close the fridge door"]),
-    (["bin","trash","rubbish","throw"],
-     ["throw rubbish in the bin","open the bin lid","put trash in the bin"]),
-    (["wash","sink","hands","tap"],
-     ["wash hands in the sink","turn on the tap","rinse hands under water"]),
-    (["cut","chop","knife","board","slice"],
-     ["cut vegetables on the board","chop food with a knife",
-      "slice ingredients on the cutting board"]),
-    (["cook","stove","hob","pan","pot","stir","boil"],
-     ["stir food in the pan","cook on the stove","boil water in the pot"]),
-    (["plate","dish","serve"],
-     ["put food on a plate","use a white plate","place food on the dish"]),
-    (["peel","vegetable","onion","tomato"],
-     ["peel a vegetable","prepare vegetables","chop an onion on the board"]),
-    (["eat","meal"], ["eat food","pick up food to eat","have a meal"]),
-    (["pour","water","liquid","bottle"],
-     ["pour water into the pot","pour liquid from a bottle","fill the pot with water"]),
-    (["egg","crack"], ["crack an egg into a bowl","break an egg","whisk eggs in a bowl"]),
-]
+    with contextlib.redirect_stdout(buffer):
+        mq.HANDLERS[intent["type"]](question, intent, mq.check_ollama())
 
-def expand(q):
-    ql = q.lower()
-    for kws, exps in RULES:
-        if any(k in ql for k in kws): return exps
-    return [q]
+    return intent, buffer.getvalue()
 
-def parse_filter(q):
-    s = None; t = None
-    m = re.search(r'\bP\d+_\d+\b', q)
-    if m: s = m.group(0)
-    m = re.search(
-        r'(?:around\s+|at\s+)?(\d+)\s*(?:minutes?|mins?)\b|(?:minute|min)\s+(\d+)\b',
-        q, re.IGNORECASE)
-    if m: t = int(m.group(1) or m.group(2)) * 60
-    return s, t
 
-# ── SEARCH ────────────────────────────────────────────────────────────────────
-def search(query, pool, threshold, top_k):
-    sys = load_system()
-    nars = expand(query)
-    toks = sys["tokenizer"](nars, return_tensors="pt",
-                            padding="max_length", truncation=True, max_length=77)
-    with torch.no_grad():
-        f = sys["model"].encode_text(toks["input_ids"])
-        f = f / f.norm(dim=-1, keepdim=True)
-    vec = f.mean(dim=0, keepdim=True).cpu().numpy().astype("float32")
-    vec = vec - sys["mean_vec"]
-    faiss.normalize_L2(vec)
+def get_events_for_display(question, intent):
+    if intent["type"] in ["factual", "anchor"]:
+        query = intent.get("anchor_phrase", question) if intent["type"] == "anchor" else question
+        results, _ = mq.retrieve_events_frame_first(
+            query,
+            session_filter=intent.get("session")
+        )
+        return results[:6]
 
-    D, I = sys["index"].search(vec, pool)
-    fs, ft = parse_filter(query)
-    seen = {}
-    for score, idx in zip(D[0], I[0]):
-        if idx == -1: continue
-        fp  = sys["paths"][idx]
-        p   = Path(fp)
-        ses = p.parent.name
-        fn  = int(p.stem.split("_")[1])
-        if fs and ses != fs: continue
-        if ft is not None:
-            spf = sys["ts"].get(ses, {}).get("spf", 1.0)
-            if abs(fn * spf - ft) > 180: continue
-        ev = sys["f2e"].get((ses, fn))
-        if not ev: continue
-        eid = ev["event_id"]
-        if eid not in seen or score > seen[eid]["score"]:
-            seen[eid] = dict(score=float(score), event_id=eid,
-                             session=ev["session"],
-                             start_time=ev["start_time"], end_time=ev["end_time"],
-                             start_s=ev.get("start_s", 0),
-                             duration_s=ev["duration_s"], frame_count=ev["frame_count"],
-                             best_frame=fp, center_frame=ev["center_path"])
-    results = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
-    results = [r for r in results if r["score"] >= threshold]
-    for i, r in enumerate(results): r["rank"] = i + 1
-    return results[:top_k], nars
+    if intent["type"] == "timerange":
+        session = intent.get("session")
+        if not session:
+            return []
+        return mq.get_events_in_window(
+            session,
+            intent.get("start_s", 0),
+            intent.get("end_s", 600)
+        )
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+    if intent["type"] == "summary":
+        session = intent.get("session")
+        if session:
+            return mq.session_events.get(session, [])[:12]
+
+    return []
+
+
+def get_caption(event):
+    return (
+        event.get("caption")
+        or event.get("blip2_caption", "")
+        or event.get("activity_label", "")
+        or "No auto-caption available"
+    )
+
+
+def get_frame(event):
+    return (
+        event.get("best_frame")
+        or event.get("center_frame")
+        or event.get("center_path")
+    )
+
+
+def random_hero_frames(n=3):
+    candidates = []
+    for p in mq.paths:
+        if Path(p).exists():
+            candidates.append(p)
+
+    random.seed(7)
+    return random.sample(candidates, min(n, len(candidates)))
+
+
+# -----------------------------
+# Hero
+# -----------------------------
 st.markdown("""
 <div class="hero">
-    <h1 class="hero-title">🧠 LIFELOG MEMORY</h1>
-    <p class="hero-sub">Egocentric Video · Semantic Search · LaViLa + FAISS</p>
-</div>""", unsafe_allow_html=True)
+    <div class="hero-title">Lifelog Memory QA</div>
+    <div class="hero-subtitle">
+        A visual memory assistant for egocentric videos. Ask natural-language questions,
+        retrieve relevant moments, inspect visual evidence, and reason over events and timestamps.
+    </div>
+    <span class="tech-pill">LaViLa</span>
+    <span class="tech-pill">FAISS</span>
+    <span class="tech-pill">Frame-first Retrieval</span>
+    <span class="tech-pill">Event Grounding</span>
+    <span class="tech-pill">Llama Reasoning</span>
+</div>
+""", unsafe_allow_html=True)
 
-system = load_system()
+# Hero images
+hero_imgs = random_hero_frames(3)
+if hero_imgs:
+    hcols = st.columns(3)
+    for col, img_path in zip(hcols, hero_imgs):
+        with col:
+            st.image(Image.open(img_path), use_container_width=True)
 
-with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    threshold = st.slider("Score threshold", 0.30, 0.70, 0.45, 0.05)
-    pool_size = st.slider("Frame pool", 20, 100, 50, 10)
-    top_k     = st.slider("Max results", 1, 10, 5)
-    st.markdown("---")
-    st.markdown(f"**Frames:** {len(system['paths']):,}")
-    st.markdown(f"**Events:** {len(system['events']):,}")
-    st.markdown("---")
-    st.markdown("**Tips:** `open the fridge` · `wash hands` · `cut vegetables`")
+# Stats
+s1, s2, s3 = st.columns(3)
+with s1:
+    st.markdown(
+        f'<div class="stat-card"><div class="stat-number">{len(mq.paths):,}</div><div class="stat-label">Indexed video frames</div></div>',
+        unsafe_allow_html=True
+    )
+with s2:
+    st.markdown(
+        f'<div class="stat-card"><div class="stat-number">{len(mq.events):,}</div><div class="stat-label">Temporal memory events</div></div>',
+        unsafe_allow_html=True
+    )
+with s3:
+    st.markdown(
+        f'<div class="stat-card"><div class="stat-number">{len(mq.session_events)}</div><div class="stat-label">Egocentric sessions</div></div>',
+        unsafe_allow_html=True
+    )
 
-col_q, col_b = st.columns([5, 1])
-with col_q:
-    query = st.text_input("", placeholder="e.g. 'open the fridge'  ·  'wash hands'",
-                          label_visibility="collapsed", key="q",
-                          value=st.session_state.last_query)
-with col_b:
-    go = st.button("Search", use_container_width=True)
+# -----------------------------
+# Search
+# -----------------------------
+st.markdown('<div class="search-panel">', unsafe_allow_html=True)
 
-if go and query.strip():
-    with st.spinner("Searching memory..."):
-        res, nars = search(query.strip(), pool_size, threshold, top_k)
-    st.session_state.results    = res
-    st.session_state.narrations = nars
-    st.session_state.last_query = query.strip()
-    st.session_state.show_videos = set()
+st.markdown("### Ask a memory question")
+query = st.text_input(
+    label="",
+    placeholder="Try: When did someone cut the onion?",
+    label_visibility="collapsed"
+)
 
-if st.session_state.results:
-    results = st.session_state.results
-    nars    = st.session_state.narrations
+st.markdown("""
+<span class="example-chip">When did someone open the fridge?</span>
+<span class="example-chip">When did someone cut the onion?</span>
+<span class="example-chip">When did someone hold a white plate?</span>
+<span class="example-chip">What happened between minute 5 and 10 in P01_09?</span>
+<span class="example-chip">Summarise session P01_09</span>
+""", unsafe_allow_html=True)
 
-    pills = " ".join([f'<span class="expansion-pill">"{n}"</span>' for n in nars])
-    st.markdown(f"<div style='margin-bottom:1rem;color:#6b6b8a;font-size:0.85rem'>"
-                f"Searched as: {pills}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div style='color:#6b6b8a;font-family:Space Mono,monospace;"
-                f"font-size:0.8rem;margin-bottom:1.5rem'>"
-                f"Found {len(results)} events</div>", unsafe_allow_html=True)
+search = st.button("Search Memory", type="primary")
 
-    for r in results:
-        pct       = min(100, int(r["score"] * 120))
-        vid_url   = get_video_url(r["session"])
-        start_sec = int(r.get("start_s") or 0)
-        eid       = r["event_id"]
+st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown(f"""
-<div class="result-card">
-    <span class="rank-badge">MATCH #{r['rank']}</span>
-    <div class="session-label">{r['session']}</div>
-    <div class="timestamp-label">⏱ {r['start_time']} → {r['end_time']}</div>
-    <div class="duration-label">{r['duration_s']:.0f}s · {r['frame_count']} frames</div>
-    <div class="score-bar-bg"><div class="score-bar-fill" style="width:{pct}%"></div></div>
-    <div class="score-text">relevance {r['score']:.3f}</div>
-</div>""", unsafe_allow_html=True)
+# -----------------------------
+# Results
+# -----------------------------
+if search:
+    if not query.strip():
+        st.warning("Please enter a memory question.")
+        st.stop()
 
-        img_col, vid_col = st.columns([1, 2])
-        with img_col:
-            try:
-                st.image(Image.open(r["best_frame"]),
-                         caption="Best matching frame", use_container_width=True)
-            except Exception:
-                st.warning("Frame not found")
+    question = query.strip()
 
-        with vid_col:
-            if vid_url:
-                if st.button(f"▶ Play from {r['start_time']}", key=f"p_{eid}"):
-                    if eid in st.session_state.show_videos:
-                        st.session_state.show_videos.discard(eid)
-                    else:
-                        st.session_state.show_videos.add(eid)
+    with st.spinner("Retrieving visual memories and reasoning over events..."):
+        intent, raw_output = run_query(question)
+        events = get_events_for_display(question, intent)
 
-                if eid in st.session_state.show_videos:
+    answer = clean_answer(raw_output)
+
+    st.markdown(
+        f"""
+        <div class="answer-card">
+            <div class="intent-badge">{intent["type"].upper()}</div>
+            <div class="answer-title">Answer</div>
+            <div class="answer-text">{answer}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if events:
+        st.markdown('<div class="section-title">Retrieved visual evidence</div>', unsafe_allow_html=True)
+
+        cols = st.columns(3)
+
+        for i, ev in enumerate(events, start=1):
+            with cols[(i - 1) % 3]:
+                session = ev.get("session", "unknown")
+                start = ev.get("start_time", "?")
+                end = ev.get("end_time", "?")
+                duration = ev.get("duration_s", 0)
+                score = ev.get("score", None)
+                caption = get_caption(ev)
+                frame_path = get_frame(ev)
+
+                st.markdown('<div class="event-card">', unsafe_allow_html=True)
+
+                if frame_path and Path(frame_path).exists():
+                    st.image(Image.open(frame_path), use_container_width=True)
+
+                st.markdown('<div class="event-inner">', unsafe_allow_html=True)
+                st.markdown(f'<span class="event-rank">Evidence {i}</span>', unsafe_allow_html=True)
+                st.markdown(f'<div class="event-title">{session}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="meta">{start} → {end} · {duration:.0f}s</div>',
+                    unsafe_allow_html=True
+                )
+
+                if score is not None:
                     st.markdown(
-                        f"<p style='color:#6b6b8a;font-family:Space Mono,monospace;"
-                        f"font-size:0.75rem;margin-bottom:0.3rem'>"
-                        f"📹 {r['session']} · {r['start_time']}</p>",
+                        f'<div class="score">Visual retrieval score: {score:.4f}</div>',
                         unsafe_allow_html=True
                     )
-                    # autoplay + muted satisfies Chrome autoplay policy
-                    # #t=start_sec in URL hints the browser to seek immediately
-                    # onloadedmetadata sets currentTime precisely after metadata loads
-                    st.markdown(
-                        f'<video width="100%" controls autoplay muted preload="auto" '
-                        f'style="border-radius:8px;background:#000;max-height:380px" '
-                        f'onloadedmetadata="this.currentTime={start_sec}">'
-                        f'<source src="{vid_url}#t={start_sec}" type="video/mp4">'
-                        f'</video>',
-                        unsafe_allow_html=True
-                    )
-            else:
-                st.info(f"Video not found for {r['session']}")
 
-        st.markdown("<hr style='border-color:#1c1c28;margin:1rem 0'>",
-                    unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="auto-caption"><b>Auto-caption:</b> {caption}</div>',
+                    unsafe_allow_html=True
+                )
 
-elif go and not query.strip():
-    st.warning("Please enter a search query.")
+                st.markdown('</div></div>', unsafe_allow_html=True)
+
+    else:
+        st.info("No related events found.")
+
+st.markdown(
+    '<div class="footer-note">Frame-level LaViLa retrieval is used as primary evidence. Auto-captions are auxiliary and may be noisy.</div>',
+    unsafe_allow_html=True
+)
