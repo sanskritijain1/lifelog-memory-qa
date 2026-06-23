@@ -1,10 +1,12 @@
 """
 memory_qa.py — Unified Memory QA
 
-Fix:
-- Factual/anchor retrieval now preserves raw LaViLa search behavior.
-- No aggressive rule-based query expansion during retrieval.
-- Uses raw query + cleaned query variants separately, then merges results.
+Final design:
+- Factual + anchor queries use frame-first LaViLa retrieval.
+- Top frames are grouped into events using events.json.
+- Events are ranked by best matching frame score.
+- BLIP-2 captions are used only as supporting context.
+- Time-range, summary, counting, and comparison use event timelines.
 """
 
 import os, sys, json, gc, re
@@ -16,7 +18,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
 
 LAVILA_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "LaViLa"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "LaViLa"
 )
 if LAVILA_ROOT not in sys.path:
     sys.path.insert(0, LAVILA_ROOT)
@@ -41,16 +44,19 @@ CHECKPOINT_PATH = "pretrained/lavila_tsf_base_ep5.pth"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3"
 
-FRAME_POOL = 50
+FRAME_POOL = 100
 SCORE_THRESHOLD = 0.45
 TOP_K = 5
+
 BEFORE_WINDOW = 120
 AFTER_WINDOW = 120
+
 DEVICE = "cpu"
 NUM_FRAMES = 4
 
 # ── LOAD SYSTEM ───────────────────────────────────────────────────────────────
 print("Loading LaViLa retrieval system...")
+
 from lavila.models import models as lavila_models
 
 ckpt = torch.load(CHECKPOINT_PATH, map_location="cpu")
@@ -94,51 +100,49 @@ for s in session_events:
 with open(TIMESTAMPS_PATH) as f:
     session_ts = json.load(f)
 
-print(f"  ✓ {len(events)} events  |  {len(session_events)} sessions")
+print(f"  ✓ {len(events)} events | {len(session_events)} sessions")
+print(f"  ✓ {len(paths)} frames indexed")
 
 del model
 gc.collect()
 
 print("  Loading text encoder...")
+
 _ckpt = torch.load(CHECKPOINT_PATH, map_location="cpu")
 _sd = {k.replace("module.", ""): v for k, v in _ckpt["state_dict"].items()}
 
-_model = lavila_models.CLIP_OPENAI_TIMESFORMER_BASE(num_frames=NUM_FRAMES)
-_model.load_state_dict(_sd, strict=False)
-_model.eval()
-
-text_encoder = _model
+text_encoder = lavila_models.CLIP_OPENAI_TIMESFORMER_BASE(num_frames=NUM_FRAMES)
+text_encoder.load_state_dict(_sd, strict=False)
+text_encoder.eval()
 
 del _ckpt, _sd
 gc.collect()
 
 print("  ✓ Text encoder ready")
 
-# ── LIGHTWEIGHT QUERY CLEANING ────────────────────────────────────────────────
+# ── QUERY CLEANING ────────────────────────────────────────────────────────────
 def clean_query_for_lavila(q: str) -> str:
-    """
-    Converts question-style text into LaViLa-style action text,
-    without replacing specific objects.
-
-    Example:
-    "when did someone cut onions?" → "cut onions"
-    "when was a white plate used?" → "white plate used"
-    """
-    q = q.lower().strip().replace("?", "")
+    q = q.lower().replace("?", "").strip()
 
     remove_patterns = [
         r"\bwhen did\b",
         r"\bwhen was\b",
         r"\bwhere did\b",
         r"\bwhat time did\b",
+        r"\bwhat happened\b",
         r"\bsomeone\b",
         r"\bthe person\b",
         r"\bhe\b",
         r"\bshe\b",
         r"\bthey\b",
-        r"\bwas\b",
         r"\bdid\b",
-        r"\bdoing\b",
+        r"\bwas\b",
+        r"\bwere\b",
+        r"\bis\b",
+        r"\bare\b",
+        r"\ba\b",
+        r"\ban\b",
+        r"\bthe\b",
     ]
 
     for pattern in remove_patterns:
@@ -148,10 +152,6 @@ def clean_query_for_lavila(q: str) -> str:
 
 
 def build_query_variants(q: str) -> list[str]:
-    """
-    Use raw query + cleaned query.
-    Do NOT use hardcoded semantic expansion for retrieval.
-    """
     raw = q.strip()
     cleaned = clean_query_for_lavila(q)
 
@@ -168,76 +168,46 @@ def build_query_variants(q: str) -> list[str]:
 # ── INTENT CLASSIFIER ─────────────────────────────────────────────────────────
 def classify_intent(query: str) -> dict:
     q = query.lower()
+
     session_m = re.search(r"\bP\d+_\d+\b", query)
     session = session_m.group(0) if session_m else None
 
     if re.search(r"\bhow many times\b|\bcount\b|\bnumber of times\b|\bhow often\b", q):
-        return {
-            "type": "counting",
-            "session": session,
-            "anchor_phrase": query,
-            "direction": None,
-            "start_s": None,
-            "end_s": None,
-        }
+        return {"type": "counting", "session": session}
 
     if re.search(r"\bcompare\b|\bvs\b|\bversus\b|\bdifference between\b", q):
-        return {
-            "type": "comparison",
-            "session": session,
-            "anchor_phrase": None,
-            "direction": None,
-            "start_s": None,
-            "end_s": None,
-        }
+        return {"type": "comparison", "session": session}
 
     if re.search(r"\bsummar\b|\beverything\b|\boverview\b|\ball events\b|\bwhole session\b", q):
-        return {
-            "type": "summary",
-            "session": session,
-            "anchor_phrase": None,
-            "direction": None,
-            "start_s": None,
-            "end_s": None,
-        }
+        return {"type": "summary", "session": session}
 
-    if session and re.search(r"\bsession\b", q) and not any(
+    if session and "session" in q and not any(
         kw in q for kw in ["before", "after", "around", "between", "minute", "when", "how many", "compare"]
     ):
-        return {
-            "type": "summary",
-            "session": session,
-            "anchor_phrase": None,
-            "direction": None,
-            "start_s": None,
-            "end_s": None,
-        }
+        return {"type": "summary", "session": session}
 
     range_m = re.search(
-        r"between\s+(?:minute\s+)?(\d+)\s+and\s+(?:minute\s+)?(\d+)", q
+        r"between\s+(?:minute\s+)?(\d+)\s+and\s+(?:minute\s+)?(\d+)",
+        q,
     )
     if range_m:
         return {
             "type": "timerange",
             "session": session,
-            "anchor_phrase": None,
-            "direction": None,
             "start_s": int(range_m.group(1)) * 60,
             "end_s": int(range_m.group(2)) * 60,
         }
 
     around_m = re.search(
-        r"(?:around|at)\s+(?:minute\s+)?(\d+)|(\d+)\s*minutes?\s+(?:in|into)", q
+        r"(?:around|at)\s+(?:minute\s+)?(\d+)|(\d+)\s*minutes?\s+(?:in|into)",
+        q,
     )
     if around_m:
         val = int(around_m.group(1) or around_m.group(2))
         mid = val * 60
-
         return {
             "type": "timerange",
             "session": session,
-            "anchor_phrase": None,
-            "direction": None,
             "start_s": max(0, mid - 60),
             "end_s": mid + 60,
         }
@@ -252,8 +222,6 @@ def classify_intent(query: str) -> dict:
             "direction": "before",
             "anchor_phrase": before_m.group(2).strip(),
             "session": session,
-            "start_s": None,
-            "end_s": None,
         }
 
     if after_m:
@@ -262,8 +230,6 @@ def classify_intent(query: str) -> dict:
             "direction": "after",
             "anchor_phrase": after_m.group(2).strip(),
             "session": session,
-            "start_s": None,
-            "end_s": None,
         }
 
     if around_m2:
@@ -272,21 +238,12 @@ def classify_intent(query: str) -> dict:
             "direction": "around",
             "anchor_phrase": around_m2.group(2).strip(),
             "session": session,
-            "start_s": None,
-            "end_s": None,
         }
 
-    return {
-        "type": "factual",
-        "session": session,
-        "anchor_phrase": None,
-        "direction": None,
-        "start_s": None,
-        "end_s": None,
-    }
+    return {"type": "factual", "session": session}
 
-# ── CORE RETRIEVAL ────────────────────────────────────────────────────────────
-def encode_single_query(text: str) -> np.ndarray:
+# ── FRAME-FIRST RETRIEVAL ─────────────────────────────────────────────────────
+def encode_query(text: str) -> np.ndarray:
     tokens = tokenizer(
         text,
         return_tensors="pt",
@@ -302,25 +259,15 @@ def encode_single_query(text: str) -> np.ndarray:
     vec = feat.cpu().numpy().astype("float32")
     vec = vec - mean_vec
     faiss.normalize_L2(vec)
-
     return vec
 
 
-def encode_and_search(
-    phrase: str,
-    session_filter: str = None,
-    top_k: int = FRAME_POOL,
-) -> list[dict]:
-    """
-    Searches raw query and cleaned query separately.
-    Merges frame results before mapping to events.
-    This preserves LaViLa's direct retrieval quality.
-    """
-    query_variants = build_query_variants(phrase)
-    merged_frames = {}
+def frame_search(query: str, top_k: int = FRAME_POOL) -> tuple[list[dict], list[str]]:
+    variants = build_query_variants(query)
+    merged = {}
 
-    for q in query_variants:
-        vec = encode_single_query(q)
+    for q in variants:
+        vec = encode_query(q)
         D, I = frame_index.search(vec, top_k)
 
         for score, idx in zip(D[0], I[0]):
@@ -329,51 +276,62 @@ def encode_and_search(
 
             fp = paths[idx]
 
-            if fp not in merged_frames or score > merged_frames[fp]["score"]:
-                merged_frames[fp] = {
+            if fp not in merged or score > merged[fp]["score"]:
+                merged[fp] = {
                     "score": float(score),
                     "path": fp,
                     "query_used": q,
                 }
 
-    frame_results = sorted(
-        merged_frames.values(),
-        key=lambda x: x["score"],
-        reverse=True,
-    )
+    results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+    return results[:top_k], variants
 
+
+def retrieve_events_frame_first(
+    query: str,
+    session_filter: str = None,
+    top_k: int = TOP_K,
+    frame_pool: int = FRAME_POOL,
+) -> tuple[list[dict], list[str]]:
+    """
+    Core fix:
+    Search frames first, then map to events.
+    Rank event by best matching frame score.
+    """
+    frame_results, variants = frame_search(query, frame_pool)
     seen = {}
 
     for fr in frame_results:
         fp = fr["path"]
         p = Path(fp)
-        ses = p.parent.name
-        fn = int(p.stem.split("_")[1])
 
-        if session_filter and ses != session_filter:
+        session = p.parent.name
+        frame_num = int(p.stem.split("_")[1])
+
+        if session_filter and session != session_filter:
             continue
 
-        ev = frame_to_event.get((ses, fn))
-
-        if not ev:
+        ev = frame_to_event.get((session, frame_num))
+        if ev is None:
             continue
 
         eid = ev["event_id"]
+        caption = ev.get("blip2_caption", "").strip() or ev.get("activity_label", "")
 
         if eid not in seen or fr["score"] > seen[eid]["score"]:
             seen[eid] = {
+                "rank": 0,
                 "score": float(fr["score"]),
                 "event_id": eid,
                 "session": ev["session"],
                 "start_time": ev["start_time"],
                 "end_time": ev["end_time"],
                 "start_s": ev.get("start_s", 0),
-                "duration_s": ev["duration_s"],
-                "frame_count": ev["frame_count"],
+                "duration_s": ev.get("duration_s", 0),
+                "frame_count": ev.get("frame_count", 0),
                 "best_frame": fp,
                 "query_used": fr["query_used"],
-                "caption": ev.get("blip2_caption", "").strip()
-                or ev.get("activity_label", ""),
+                "caption": caption,
             }
 
     results = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
@@ -381,11 +339,9 @@ def encode_and_search(
     for i, r in enumerate(results):
         r["rank"] = i + 1
 
-    print(f"  Query variants used: {query_variants}")
+    return results[:top_k], variants
 
-    return results
-
-
+# ── TIMELINE HELPERS ──────────────────────────────────────────────────────────
 def get_events_in_window(session: str, start_s: float, end_s: float) -> list[dict]:
     out = []
 
@@ -399,14 +355,14 @@ def get_events_in_window(session: str, start_s: float, end_s: float) -> list[dic
     return sorted(out, key=lambda e: e.get("start_s", e["start_frame"]))
 
 
-def format_event(ev: dict, index: int, anchor_id: int = None) -> str:
+def format_event(ev: dict, index: int, anchor_id=None) -> str:
     marker = " ← [ANCHOR]" if anchor_id and ev["event_id"] == anchor_id else ""
     caption = ev.get("blip2_caption", "").strip() or ev.get("activity_label", "")
-    cap_str = f"  [{caption}]" if caption else ""
+    cap = f"  [{caption}]" if caption else ""
 
     return (
-        f"  Event {index}: {ev['start_time']} → {ev['end_time']}  "
-        f"({ev.get('duration_s', 0):.0f}s){cap_str}  [{ev['session']}]{marker}"
+        f"  Event {index}: {ev['start_time']} → {ev['end_time']} "
+        f"({ev.get('duration_s', 0):.0f}s){cap} [{ev['session']}]{marker}"
     )
 
 # ── OLLAMA ────────────────────────────────────────────────────────────────────
@@ -436,13 +392,19 @@ def call_llm(prompt: str, system: str, max_tokens: int = 400) -> str:
         r = requests.post(OLLAMA_URL, json=payload, timeout=120)
         r.raise_for_status()
         return r.json().get("response", "").strip()
-    except Exception:
-        return "(LLM unavailable)"
+    except Exception as e:
+        return f"(LLM unavailable: {e})"
 
 # ── HANDLERS ─────────────────────────────────────────────────────────────────
 def handle_factual(question, intent, ollama_ready):
-    results = encode_and_search(question, intent.get("session"))
+    results, variants = retrieve_events_frame_first(
+        question,
+        session_filter=intent.get("session"),
+    )
+
     results = [r for r in results if r["score"] >= SCORE_THRESHOLD][:TOP_K]
+
+    print(f"  Query variants used: {variants}")
 
     if not results:
         print("  No confident matches found. Try rephrasing.")
@@ -451,49 +413,47 @@ def handle_factual(question, intent, ollama_ready):
     print(f"\n  Top {len(results)} matching events:")
 
     for r in results:
-        cap = f"  [{r['caption']}]" if r.get("caption") else ""
-
+        cap = f"  [auto-caption: {r['caption']}]" if r.get("caption") else ""
         print(
-            f"    [{r['rank']}] {r['session']}  "
-            f"{r['start_time']} → {r['end_time']}  "
-            f"({r['duration_s']:.0f}s)  score={r['score']:.4f}  "
-            f"query='{r.get('query_used', '')}'{cap}"
+            f"    [{r['rank']}] {r['session']} "
+            f"{r['start_time']} → {r['end_time']} "
+            f"({r['duration_s']:.0f}s) score={r['score']:.4f} "
+            f"query='{r['query_used']}'{cap}"
         )
+        print(f"         best frame: {r['best_frame']}")
 
     if not ollama_ready:
         return
 
-    context = (
-        "Retrieved memory entries ranked by visual-language confidence "
-        "(Memory 1 = highest confidence):\n\n"
-        + "\n\n".join(
-            [
-                f"  Memory {r['rank']} (confidence {r['score']:.3f}):\n"
-                f"    Session  : {r['session']}\n"
-                f"    Time     : {r['start_time']} → {r['end_time']} "
-                f"({r['duration_s']:.0f}s)\n"
-                f"    Query    : {r.get('query_used', '')}\n"
-                f"    Caption  : {r.get('caption') or 'unknown'}"
-                for r in results
-            ]
-        )
+    context = "\n\n".join(
+        [
+            f"Memory {r['rank']}:\n"
+            f"Session: {r['session']}\n"
+            f"Time: {r['start_time']} → {r['end_time']} ({r['duration_s']:.0f}s)\n"
+            f"Visual score: {r['score']:.3f}\n"
+            f"Best frame: {r['best_frame']}\n"
+            f"Query used: {r['query_used']}\n"
+            f"Caption: {r.get('caption') or 'not available'}"
+            for r in results
+        ]
     )
 
     system = (
-        "You are a memory assistant for egocentric kitchen video. "
-        "The retrieved entries are visual-language matches ranked by confidence. "
-        "Use Memory 1 as the primary visual match. "
-        "Captions are supporting descriptions and may be imperfect. "
-        "If the exact queried object is not explicitly confirmed by captions, "
-        "say that the visual retrieval suggests a likely match but the caption "
-        "does not explicitly confirm the exact object. "
-        "Do not invent intentions. Report timestamps exactly."
-    )
+    "You are a memory assistant for egocentric video. "
+    "The entries were retrieved using frame-level visual-language search. "
+    "The visual retrieval score and best frame are the primary evidence. "
+    "Auto-captions are secondary supporting context and may be noisy or incorrect. "
+    "Do not reject a high-confidence visual match only because the auto-caption is broad or different. "
+    "When answering, list the strongest visual matches with exact timestamps. "
+    "If auto-captions disagree with the query, mention that the auto-caption may be noisy and that the best frame is the stronger evidence. "
+    "Do not invent unseen objects or intentions. "
+    "Report timestamps exactly."
+)
 
     print("\n  Generating answer...")
 
     answer = call_llm(
-        f"{context}\n\nQuestion: {question}\n\nAnswer:",
+        f"Retrieved memories:\n\n{context}\n\nQuestion: {question}\n\nAnswer:",
         system,
     )
 
@@ -507,51 +467,59 @@ def handle_anchor(question, intent, ollama_ready):
 
     print(f"  Finding anchor event: '{phrase}'...")
 
-    results = encode_and_search(phrase, intent.get("session"))
-    results = [r for r in results if r["score"] >= SCORE_THRESHOLD]
-
-    if not results:
-        print("  ✗ Could not find anchor event. Try rephrasing.")
-        return
-
-    anchor = results[0]
-    anchor_s = anchor["start_s"]
-    anchor_ses = anchor["session"]
-
-    print(
-        f"  ✓ Anchor: {anchor_ses}  "
-        f"{anchor['start_time']} → {anchor['end_time']}  "
-        f"score={anchor['score']:.4f}"
+    anchors, variants = retrieve_events_frame_first(
+        phrase,
+        session_filter=intent.get("session"),
     )
 
-    if anchor.get("caption"):
-        print(f"    Caption: {anchor['caption']}")
+    anchors = [a for a in anchors if a["score"] >= SCORE_THRESHOLD]
 
-    direction = intent.get("direction") or "around"
+    print(f"  Anchor query variants used: {variants}")
+
+    if not anchors:
+        print("  ✗ Could not find anchor event.")
+        return
+
+    anchor = anchors[0]
+    direction = intent.get("direction", "around")
+
+    print(
+        f"  ✓ Anchor: {anchor['session']} "
+        f"{anchor['start_time']} → {anchor['end_time']} "
+        f"score={anchor['score']:.4f}"
+    )
+    print(f"    best frame: {anchor['best_frame']}")
+    if anchor.get("caption"):
+        print(f"    caption: {anchor['caption']}")
 
     if direction == "before":
-        win_start, win_end = anchor_s - BEFORE_WINDOW, anchor_s
+        start_s = anchor["start_s"] - BEFORE_WINDOW
+        end_s = anchor["start_s"]
     elif direction == "after":
-        win_start = anchor_s + anchor.get("duration_s", 0)
-        win_end = win_start + AFTER_WINDOW
+        start_s = anchor["start_s"] + anchor.get("duration_s", 0)
+        end_s = start_s + AFTER_WINDOW
     else:
-        win_start = anchor_s - BEFORE_WINDOW // 2
-        win_end = anchor_s + AFTER_WINDOW // 2
+        start_s = anchor["start_s"] - BEFORE_WINDOW // 2
+        end_s = anchor["start_s"] + AFTER_WINDOW // 2
 
-    window_events = get_events_in_window(anchor_ses, max(0, win_start), win_end)
+    window_events = get_events_in_window(
+        anchor["session"],
+        max(0, start_s),
+        end_s,
+    )
 
     if not window_events:
-        print("  ✗ No events found in the temporal window.")
+        print("  No events found in the temporal window.")
         return
 
     timeline = "\n".join(
-        [format_event(ev, i + 1, anchor["event_id"]) for i, ev in enumerate(window_events)]
+        [
+            format_event(ev, i + 1, anchor["event_id"])
+            for i, ev in enumerate(window_events)
+        ]
     )
 
-    print(
-        f"\n  ── Timeline ({len(window_events)} events, "
-        f"{direction} anchor) ────────────"
-    )
+    print(f"\n  ── Timeline ({len(window_events)} events, {direction} anchor) ────────────")
     print(timeline)
     print("  " + "─" * 52)
 
@@ -559,13 +527,11 @@ def handle_anchor(question, intent, ollama_ready):
         return
 
     system = (
-        "You are a memory assistant for egocentric kitchen video. "
+        "You are a memory assistant. "
         "Answer only from the chronological timeline. "
         "List relevant events in order with timestamps. "
-        "Do not invent events not in the timeline."
+        "Never invent events."
     )
-
-    print("\n  Reasoning over timeline...")
 
     answer = call_llm(
         f"Timeline:\n{timeline}\n\nQuestion: {question}\n\nAnswer:",
@@ -578,14 +544,14 @@ def handle_anchor(question, intent, ollama_ready):
 
 
 def handle_timerange(question, intent, ollama_ready):
-    start_s = intent.get("start_s") or 0
-    end_s = intent.get("end_s") or 600
     session = intent.get("session")
+    start_s = intent.get("start_s", 0)
+    end_s = intent.get("end_s", 600)
 
     print(
         f"  Time range: {start_s//60}:{start_s%60:02d} → "
         f"{end_s//60}:{end_s%60:02d}"
-        + (f"  session: {session}" if session else "  all sessions")
+        + (f" session: {session}" if session else " all sessions")
     )
 
     if session:
@@ -597,32 +563,26 @@ def handle_timerange(question, intent, ollama_ready):
         window_events.sort(key=lambda e: e.get("start_s", e["start_frame"]))
 
     if not window_events:
-        print("  ✗ No events found in this time range.")
+        print("  No events found in this time range.")
         return
 
-    timeline = "\n".join([format_event(ev, i + 1) for i, ev in enumerate(window_events)])
+    timeline = "\n".join(
+        [format_event(ev, i + 1) for i, ev in enumerate(window_events)]
+    )
 
     print(f"\n  ── Timeline ({len(window_events)} events) ──────────────────")
     print(timeline)
     print("  " + "─" * 52)
 
-    if not ollama_ready:
-        return
+    if ollama_ready:
+        answer = call_llm(
+            f"Timeline:\n{timeline}\n\nQuestion: {question}\n\nAnswer:",
+            "Summarise the timeline using only listed events. Include timestamps.",
+        )
 
-    system = (
-        "You are a memory assistant. Summarise what happened during the "
-        "requested time period using all events in the timeline. "
-        "List activities with timestamps. Never invent events."
-    )
-
-    answer = call_llm(
-        f"Timeline:\n{timeline}\n\nQuestion: {question}\n\nAnswer:",
-        system,
-    )
-
-    print("\n  ── Answer ──────────────────────────────────────")
-    print(f"  {answer}")
-    print("  ────────────────────────────────────────────────")
+        print("\n  ── Answer ──────────────────────────────────────")
+        print(f"  {answer}")
+        print("  ────────────────────────────────────────────────")
 
 
 def handle_counting(question, intent, ollama_ready):
@@ -630,7 +590,7 @@ def handle_counting(question, intent, ollama_ready):
     target_sessions = [session] if session else list(session_events.keys())
 
     q = question.lower()
-    matching_events = []
+    matches = []
 
     for ses in target_sessions:
         for ev in session_events.get(ses, []):
@@ -643,14 +603,14 @@ def handle_counting(question, intent, ollama_ready):
                 continue
 
             if "wash" in q and "hand" in q:
-                positive = [
+                positives = [
                     "washing his hands",
                     "washing their hands",
+                    "washing her hands",
                     "wash hands",
                     "washing hands",
-                    "washing her hands",
                 ]
-                negative = [
+                negatives = [
                     "washing dishes",
                     "dishwasher",
                     "cleaning the sink",
@@ -658,68 +618,57 @@ def handle_counting(question, intent, ollama_ready):
                     "washing a dish",
                 ]
 
-                if any(p in caption for p in positive) and not any(n in caption for n in negative):
-                    matching_events.append(ev)
+                if any(p in caption for p in positives) and not any(n in caption for n in negatives):
+                    matches.append(ev)
 
             else:
                 cleaned = clean_query_for_lavila(question)
                 words = [w for w in cleaned.split() if len(w) > 3]
+                if words and all(w in caption for w in words[:2]):
+                    matches.append(ev)
 
-                if all(w in caption for w in words[:2]):
-                    matching_events.append(ev)
+    print(f"\n  Found {len(matches)} matching events:")
 
-    print(f"\n  Found {len(matching_events)} matching events:")
-
-    for ev in matching_events:
+    for ev in matches:
         caption = ev.get("blip2_caption", "") or ev.get("activity_label", "")
-
         print(
-            f"    {ev['session']}  {ev['start_time']} → {ev['end_time']}  "
+            f"    {ev['session']} {ev['start_time']} → {ev['end_time']} "
             f"[{caption}]"
         )
 
-    if ollama_ready:
-        print(f"\n  Answer: {len(matching_events)} occurrences.")
+    print(f"\n  Answer: {len(matches)} occurrences.")
 
 
 def handle_comparison(question, intent, ollama_ready):
-    sessions_mentioned = re.findall(r"\bP\d+_\d+\b", question)
+    sessions = re.findall(r"\bP\d+_\d+\b", question)
 
-    if len(sessions_mentioned) < 2:
+    if len(sessions) < 2:
         print("  Please provide two sessions, e.g. Compare P01_09 and P30_107.")
         return
 
-    timelines = {}
+    sections = []
 
-    for ses in sessions_mentioned[:2]:
+    for ses in sessions[:2]:
         evs = session_events.get(ses, [])
-        timelines[ses] = "\n".join(
+        timeline = "\n".join(
             [format_event(ev, i + 1) for i, ev in enumerate(evs[:30])]
         )
+        sections.append(f"Session {ses}:\n{timeline}")
 
-    context = "\n\n".join([f"Session {ses}:\n{tl}" for ses, tl in timelines.items()])
+    context = "\n\n".join(sections)
 
-    print(f"\n  Comparing {list(timelines.keys())}...")
+    print(f"\n  Comparing {sessions[:2]}...")
 
-    if not ollama_ready:
-        print(context)
-        return
+    if ollama_ready:
+        answer = call_llm(
+            f"{context}\n\nQuestion: {question}\n\nAnswer:",
+            "Compare the sessions using only listed captions and timestamps. Do not invent details.",
+            max_tokens=600,
+        )
 
-    system = (
-        "You are a memory assistant. Compare the activities across the "
-        "provided sessions using only the captions and timestamps. "
-        "Do not invent details."
-    )
-
-    answer = call_llm(
-        f"{context}\n\nQuestion: {question}\n\nAnswer:",
-        system,
-        max_tokens=600,
-    )
-
-    print("\n  ── Answer ──────────────────────────────────────")
-    print(f"  {answer}")
-    print("  ────────────────────────────────────────────────")
+        print("\n  ── Answer ──────────────────────────────────────")
+        print(f"  {answer}")
+        print("  ────────────────────────────────────────────────")
 
 
 def handle_summary(question, intent, ollama_ready):
@@ -739,31 +688,22 @@ def handle_summary(question, intent, ollama_ready):
         print(f"  No events found for session {session}.")
         return
 
-    timeline = "\n".join([format_event(ev, i + 1) for i, ev in enumerate(evs)])
-
-    duration = evs[-1].get("end_time", "?")
-
-    print(f"\n  Summarising {session} ({len(evs)} events, {duration} total)...")
-
-    if not ollama_ready:
-        print(timeline)
-        return
-
-    system = (
-        "You are a memory assistant. Provide a structured summary of the session "
-        "using only the timeline. Group related activities. Include timestamps "
-        "where useful. Do not invent details."
+    timeline = "\n".join(
+        [format_event(ev, i + 1) for i, ev in enumerate(evs)]
     )
 
-    answer = call_llm(
-        f"Full timeline for {session}:\n{timeline}\n\nQuestion: {question}\n\nAnswer:",
-        system,
-        max_tokens=600,
-    )
+    print(f"\n  Summarising {session} ({len(evs)} events)...")
 
-    print("\n  ── Answer ──────────────────────────────────────")
-    print(f"  {answer}")
-    print("  ────────────────────────────────────────────────")
+    if ollama_ready:
+        answer = call_llm(
+            f"Full timeline for {session}:\n{timeline}\n\nQuestion: {question}\n\nAnswer:",
+            "Provide a structured summary using only the timeline. Group related activities. Do not invent details.",
+            max_tokens=700,
+        )
+
+        print("\n  ── Answer ──────────────────────────────────────")
+        print(f"  {answer}")
+        print("  ────────────────────────────────────────────────")
 
 
 HANDLERS = {
@@ -781,19 +721,22 @@ def main():
     ollama_ready = check_ollama()
 
     print(
-        f"  {'✓ Ollama ready  |  model: ' + OLLAMA_MODEL if ollama_ready else '⚠ Ollama not running — showing timelines only'}"
+        f"  {'✓ Ollama ready | model: ' + OLLAMA_MODEL if ollama_ready else '⚠ Ollama not running — showing timelines only'}"
     )
 
     print("\n" + "=" * 62)
-    print("  LIFELOG MEMORY QA  —  LaViLa raw retrieval + Event QA")
+    print("  LIFELOG MEMORY QA — Frame-first LaViLa + Event QA")
     print("=" * 62)
-    print("  Factual:    'When did someone open the fridge?'")
-    print("              'When did someone cut onions?'")
-    print("              'When was a white plate used?'")
-    print("  Anchor:     'What happened before opening the fridge?'")
-    print("  Time range: 'What happened between minute 5 and 10 in P01_09?'")
-    print("  Counting:   'How many times did he wash his hands in session P01_09?'")
-    print("  Summary:    'Summarise session P01_09'")
+    print("  Factual:")
+    print("    When did someone cut the onion?")
+    print("    When did someone hold a white plate?")
+    print("    When did someone open the fridge?")
+    print("  Anchor:")
+    print("    What happened before opening the fridge?")
+    print("  Time range:")
+    print("    What happened between minute 5 and 10 in P01_09?")
+    print("  Summary:")
+    print("    Summarise session P01_09")
     print("  Type 'exit' to quit.")
     print("=" * 62)
 
@@ -816,8 +759,8 @@ def main():
 
             print(
                 f"  Query type: {intent['type'].upper()}"
-                + (f"  direction: {intent['direction']}" if intent.get("direction") else "")
-                + (f"  session: {intent['session']}" if intent.get("session") else "")
+                + (f" direction: {intent['direction']}" if intent.get("direction") else "")
+                + (f" session: {intent['session']}" if intent.get("session") else "")
             )
 
             HANDLERS[intent["type"]](question, intent, ollama_ready)
