@@ -1,306 +1,161 @@
-# 🧠 Lifelog Memory System  
+# 🧠 Lifelog Memory System
 ### A Multimodal AI Memory Retrieval System for Egocentric Video Understanding
 
 <p align="center">
-  <img src="screenshots/homepage.png" width="850">
+  <img src="screenshots/homepage.png" width="900">
 </p>
 
 A research-oriented **personal memory retrieval system** that enables users to search and reason over long egocentric video memories using natural language queries.
 
-The system combines **video-language representation learning, vector retrieval, event-level memory organization, and large language models** to answer questions such as:
+The system combines **LaViLa video-language representations, FAISS vector search, event-level memory organization, temporal reasoning, and Llama (via Ollama)** to answer questions over long egocentric videos.
 
-- "When did someone open the fridge?"
-- "What happened before cutting vegetables?"
-- "Summarize session P01_09"
-- "How many times were hands washed?"
+Example questions:
 
-Instead of searching raw videos manually, the system converts visual experiences into a searchable semantic memory.
+- *When did someone open the fridge?*
+- *What happened before cutting vegetables?*
+- *Summarise session P01_09*
+- *How many times were hands washed?*
+
+Instead of manually searching through hours of video, the system transforms visual experiences into a searchable semantic memory.
 
 ---
 
 # ✨ Features
 
-## 🔍 Semantic Memory Search
-
-Search daily-life videos using natural language.
-
-Examples:
-
-```
-open the fridge
-
-person holding a knife
-
-washing hands
-
-cut vegetables
-```
-
-The system retrieves the most relevant moments from recorded experiences.
+- 🔍 Natural language memory search
+- 🎥 LaViLa-based visual-language retrieval
+- 🧠 Frame-first event reconstruction
+- ⏱️ Temporal reasoning over events
+- 💬 Llama-powered memory assistant
+- 🌐 Interactive Streamlit interface
 
 ---
 
-## 🎥 Video-Language Understanding with LaViLa
+# 🏗️ System Pipeline
 
-The system uses **LaViLa (Learning Video-Language Models)** to understand the relationship between:
-
-- visual information
-- temporal video context
-- natural language queries
-
-The model generates embeddings for video frames, enabling semantic similarity search.
-
-Pipeline:
-
+```text
+               User Query
+                    │
+                    ▼
+          LaViLa Text Encoder
+                    │
+                    ▼
+      Semantic Frame Retrieval (FAISS)
+                    │
+                    ▼
+      Frame → Event Reconstruction
+                    │
+                    ▼
+      Temporal Memory Reasoning
+                    │
+                    ▼
+        Llama (via Ollama)
+                    │
+                    ▼
+          Final Memory Answer
 ```
-Video Frames
-      |
-      v
-LaViLa Vision Encoder
-      |
-      v
-Frame Embeddings
-      |
-      v
-FAISS Vector Database
-      |
-      v
-Natural Language Retrieval
-```
+
+Unlike event-level retrieval systems, this project retrieves **individual frames first**, then reconstructs events around the strongest visual matches. This preserves visual evidence while allowing higher-level reasoning over activities.
 
 ---
 
-# 🏗️ System Architecture
+# 🔍 Example Retrieval
 
 <p align="center">
-  <img src="screenshots/architecture.png" width="850">
+  <img src="screenshots/fridge_retrieval_1.png" width="850">
 </p>
 
+The retrieval system ranks candidate events according to the highest-scoring matching frame rather than relying only on event captions.
 
-The complete pipeline consists of:
+Each retrieved memory includes:
 
-```
-                 User Query
-                     |
-                     v
-            Query Understanding
-                     |
-                     v
-              LaViLa Text Encoder
-                     |
-                     v
-          Semantic Vector Retrieval
-                     |
-                     v
-              FAISS Search Engine
-                     |
-                     v
-          Frame-Level Similarity Search
-                     |
-                     v
-              Event Reconstruction
-                     |
-                     v
-        Temporal Memory Reasoning
-                     |
-                     v
-              Llama Answer Generation
-```
+- Similarity score
+- Best matching frame
+- Event timestamps
+- Session identifier
+- Supporting BLIP-2 caption
 
 ---
 
-# 🚀 Core Components
+# ⏱️ Temporal Reasoning
 
-## 1. Video Memory Representation
-
-Raw videos are converted into frames.
+After locating an anchor event, the system reconstructs surrounding events to answer temporal questions.
 
 Example:
 
-```
-data/
- └── frames/
-      ├── P01_09/
-      │     ├── frame_00000.jpg
-      │     ├── frame_00001.jpg
-      │     └── ...
-      │
-      └── P04_107/
-```
-
-Each frame is encoded into a semantic embedding using LaViLa.
-
-Generated files:
-
-```
-data/frame_embeddings.npy
-data/frame_paths.txt
-```
-
----
-
-# 2. Vector Memory Database
-
-FAISS is used for efficient similarity search.
-
-The system stores:
-
-```
-Frame embedding
-        +
-Frame location
-        +
-Session information
-        +
-Timestamp
-```
-
-allowing fast retrieval of relevant memories.
-
----
-
-# 3. Frame-First Event Retrieval
-
-Instead of directly searching events, the system follows a frame-first strategy:
-
-```
-Query
-
- ↓
-
-Retrieve most similar frames
-
- ↓
-
-Map frames to events
-
- ↓
-
-Rank events using best matching frame
-
- ↓
-
-Return memory moments
-```
-
-This improves retrieval accuracy because the original visual evidence remains the primary signal.
-
----
-
-# 4. Temporal Memory Reasoning
-
-The system supports time-aware questions.
-
-Example:
-
-Query:
-
-```
+```text
 What happened before opening the fridge?
 ```
 
-Process:
+The system performs the following steps:
 
-```
-Find "opening fridge" event
-
-        ↓
-
-Locate timestamp
-
-        ↓
-
-Retrieve previous events
-
-        ↓
-
+```text
+Locate anchor event
+        │
+        ▼
+Find surrounding events
+        │
+        ▼
 Build chronological timeline
-
-        ↓
-
-Generate answer
+        │
+        ▼
+Generate natural language answer
 ```
-
-Example output:
-
-```
-Timeline:
-
-00:02:30 Washing hands
-00:02:55 Cutting vegetables
-00:03:15 Opening fridge
-```
-
----
-
-# 5. LLM-Based Memory Assistant
-
-The retrieved memories are passed to an LLM for reasoning.
-
-Currently supported through:
-
-- Ollama
-- Llama models
-
-The LLM is responsible for:
-
-- summarizing retrieved memories
-- explaining temporal relationships
-- answering natural language questions
-
-The model does not hallucinate new events and is constrained to retrieved evidence.
-
----
-
-# 🖥️ Web Interface
-
-The project includes an interactive Streamlit application.
 
 <p align="center">
-  <img src="screenshots/search_result.png" width="850">
+  <img src="screenshots/timeline_1.png" width="850">
 </p>
 
+---
 
-Features:
+# 💬 LLM Memory Assistant
+
+Retrieved events are passed to **Llama running through Ollama**.
+
+The language model is instructed to:
+
+- answer only using retrieved evidence
+- preserve timestamps
+- explain temporal relationships
+- avoid hallucinating unseen events
+
+Auto-generated captions are treated as supporting context rather than primary evidence.
+
+---
+
+# 🌐 Streamlit Web Interface
+
+The project also includes an interactive Streamlit application for exploring memories.
+
+<p align="center">
+  <img src="screenshots/fridge_retrieval_2.png" width="850">
+</p>
+
+Features include:
 
 - Natural language search
-- Retrieved event visualization
+- Event visualization
 - Matching frames
-- Video playback
 - Similarity scores
+- Video playback
 - Timestamp navigation
 
+---
 
-Example:
+# 📈 Timeline Visualization
 
-Query:
+Temporal queries generate chronological event timelines before producing the final answer.
 
-```
-When did someone open the fridge?
-```
-
-Output:
-
-```
-Session: P01_09
-
-Time:
-00:03:15 → 00:03:27
-
-Confidence:
-0.82
-
-Matching frame:
-[image]
-```
+<p align="center">
+  <img src="screenshots/timeline_2.png" width="850">
+</p>
 
 ---
 
 # 📂 Project Structure
 
-```
+```text
 Memory_Project/
-
 │
 ├── data/
 │   ├── frame_embeddings.npy
@@ -310,23 +165,17 @@ Memory_Project/
 │   └── session_timestamps.json
 │
 ├── scripts/
-│   │
 │   ├── build_embeddings.py
-│   │      Generate LaViLa embeddings
-│   │
 │   ├── memory_qa.py
-│   │      Command-line memory assistant
-│   │
 │   └── app.py
-│          Streamlit interface
 │
 ├── pretrained/
 │   └── lavila_tsf_base_ep5.pth
 │
 ├── LaViLa/
-│
 ├── epic_data/
-│
+├── screenshots/
+├── requirements.txt
 └── README.md
 ```
 
@@ -334,15 +183,21 @@ Memory_Project/
 
 # ⚙️ Installation
 
-## Create environment
+### Clone the repository
+
+```bash
+git clone https://github.com/sanskritijain1/lifelog-memory-qa.git
+cd lifelog-memory-qa
+```
+
+### Create a conda environment
 
 ```bash
 conda create -n lifelog2 python=3.10
-
 conda activate lifelog2
 ```
 
-Install dependencies:
+### Install dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -350,39 +205,43 @@ pip install -r requirements.txt
 
 ---
 
-# ▶️ Running the System
+# ▶️ Running the Project
 
-## Command Line Memory QA
-
-Run:
+## Command-Line Memory QA
 
 ```bash
 python scripts/memory_qa.py
 ```
 
-Example:
+Example queries:
 
-```
-Question > When did someone open the fridge?
+```text
+When did someone open the fridge?
 
-Question > What happened before cutting vegetables?
+What happened before opening the fridge?
 
-Question > Summarise session P01_09
+When did someone hold a white plate?
+
+Summarise session P01_09
+
+What happened between minute 5 and 10 in P01_09?
+
+How many times were hands washed?
 ```
 
 ---
 
-## Streamlit Interface
+## Streamlit Web Application
 
-Run:
+Launch the web interface:
 
 ```bash
 streamlit run scripts/app.py
 ```
 
-Open:
+Open your browser at:
 
-```
+```text
 http://localhost:8501
 ```
 
@@ -390,64 +249,56 @@ http://localhost:8501
 
 # 📊 Dataset
 
-The project uses egocentric cooking videos from:
+This project is built on a processed subset of the **EPIC-KITCHENS** egocentric video dataset.
 
-**EPIC-KITCHENS Dataset**
+Current dataset statistics:
 
-The processed dataset contains:
-
-```
-Sessions: 5
-
-Events: 420
-
-Frames indexed: 13,825
-```
+| Statistic | Value |
+|-----------|------:|
+| Sessions | 5 |
+| Events | 420 |
+| Indexed Frames | 13,825 |
 
 ---
 
 # 🧪 Example Queries
 
-## Object / Action Retrieval
+### Object / Action Retrieval
 
-```
-open the fridge
-```
+```text
+When did someone open the fridge?
 
-```
-person holding knife
-```
+When did someone cut the onion?
 
-```
-washing hands
+When did someone hold a white plate?
 ```
 
----
+### Temporal Reasoning
 
-## Temporal Questions
-
-```
+```text
 What happened before opening the fridge?
-```
 
-```
 What happened after washing hands?
+
+What happened around cutting vegetables?
 ```
 
----
+### Timeline Queries
 
-## Session Understanding
-
+```text
+What happened between minute 5 and 10 in P01_09?
 ```
+
+### Session Summary
+
+```text
 Summarise session P01_09
 ```
 
----
+### Counting
 
-## Counting
-
-```
-How many times did someone wash hands?
+```text
+How many times were hands washed?
 ```
 
 ---
@@ -455,36 +306,35 @@ How many times did someone wash hands?
 # 🛠️ Technologies Used
 
 | Component | Technology |
-|-|-|
-| Video Understanding | LaViLa |
-| Vision-Language Model | CLIP-based Video Transformer |
+|-----------|------------|
+| Video-Language Model | LaViLa |
+| Text Encoder | LaViLa CLIP |
 | Vector Database | FAISS |
-| Language Model | Llama via Ollama |
-| Interface | Streamlit |
 | Deep Learning | PyTorch |
+| Tokenizer | Hugging Face Transformers |
+| Language Model | Llama (Ollama) |
+| Web Interface | Streamlit |
 | Dataset | EPIC-KITCHENS |
 
 ---
 
-# 🔮 Future Improvements
+# 🚀 Future Improvements
 
-Planned extensions:
-
-- [ ] LLM-based automatic query expansion
-- [ ] Hybrid text + visual retrieval
-- [ ] Memory graph representation
-- [ ] Person-aware memory grouping
-- [ ] Long-term memory summarization
-- [ ] Learned event segmentation
-- [ ] Multi-session reasoning
+- LLM-based query expansion
+- Hybrid visual + caption retrieval
+- Cross-session memory reasoning
+- Automatic event summarization
+- Memory graph representation
+- Multi-person activity understanding
+- Learned event segmentation
 
 ---
 
-# 📌 Project Motivation
+# 📌 Motivation
 
-Human memory is not stored as isolated images; it is organized around events, actions, and temporal relationships.
+Human memories are organized around events rather than isolated images.
 
-This project explores how AI systems can transform continuous visual experiences into searchable, explainable, and interactive memories.
+This project explores how AI systems can transform continuous egocentric video into a searchable, explainable, and interactive memory system using modern vision-language models, vector databases, and large language models.
 
 ---
 
@@ -492,6 +342,7 @@ This project explores how AI systems can transform continuous visual experiences
 
 **Sanskriti Jain**
 
-M.Sc. Intelligent Interactive Systems  
+M.Sc. Intelligent Interactive Systems
+
 Universität Bielefeld
 
