@@ -1,4 +1,4 @@
-# 🧠 Lifelog Memory System
+# Lifelog Memory System
 ### A Multimodal AI Memory Retrieval System for Egocentric Video Understanding
 
 <p align="center">
@@ -20,18 +20,18 @@ Instead of manually searching through hours of video, the system transforms visu
 
 ---
 
-# ✨ Features
+# Features
 
-- 🔍 Natural language memory search
-- 🎥 LaViLa-based visual-language retrieval
-- 🧠 Frame-first event reconstruction
-- ⏱️ Temporal reasoning over events
-- 💬 Llama-powered memory assistant
-- 🌐 Interactive Streamlit interface
+- Natural language memory search
+- LaViLa-based visual-language retrieval
+- Frame-first event reconstruction
+- Temporal reasoning over events
+- Llama-powered memory assistant
+- Interactive Streamlit interface
 
 ---
 
-# 🏗️ System Pipeline
+# System Pipeline
 
 ```text
                User Query
@@ -59,7 +59,7 @@ Unlike event-level retrieval systems, this project retrieves **individual frames
 
 ---
 
-# 🔍 Example Retrieval
+# Example Retrieval
 
 <p align="center">
   <img src="screenshots/fridge_retrieval_1.png" width="850">
@@ -77,7 +77,7 @@ Each retrieved memory includes:
 
 ---
 
-# ⏱️ Temporal Reasoning
+# Temporal Reasoning
 
 After locating an anchor event, the system reconstructs surrounding events to answer temporal questions.
 
@@ -108,7 +108,7 @@ Generate natural language answer
 
 ---
 
-# 💬 LLM Memory Assistant
+# LLM Memory Assistant
 
 Retrieved events are passed to **Llama running through Ollama**.
 
@@ -123,7 +123,7 @@ Auto-generated captions are treated as supporting context rather than primary ev
 
 ---
 
-# 🌐 Streamlit Web Interface
+# Streamlit Web Interface
 
 The project also includes an interactive Streamlit application for exploring memories.
 
@@ -142,7 +142,7 @@ Features include:
 
 ---
 
-# 📈 Timeline Visualization
+# Timeline Visualization
 
 Temporal queries generate chronological event timelines before producing the final answer.
 
@@ -152,36 +152,7 @@ Temporal queries generate chronological event timelines before producing the fin
 
 ---
 
-# 📂 Project Structure
-
-```text
-Memory_Project/
-│
-├── data/
-│   ├── frame_embeddings.npy
-│   ├── frame_paths.txt
-│   ├── frame_mean.npy
-│   ├── events.json
-│   └── session_timestamps.json
-│
-├── scripts/
-│   ├── build_embeddings.py
-│   ├── memory_qa.py
-│   └── app.py
-│
-├── pretrained/
-│   └── lavila_tsf_base_ep5.pth
-│
-├── LaViLa/
-├── epic_data/
-├── screenshots/
-├── requirements.txt
-└── README.md
-```
-
----
-
-# ⚙️ Installation
+# Installation
 
 ### Clone the repository
 
@@ -205,7 +176,7 @@ pip install -r requirements.txt
 
 ---
 
-# ▶️ Running the Project
+# Running the Project
 
 ## Command-Line Memory QA
 
@@ -247,7 +218,7 @@ http://localhost:8501
 
 ---
 
-# 📊 Dataset
+# Dataset
 
 This project is built on a processed subset of the **EPIC-KITCHENS** egocentric video dataset.
 
@@ -261,7 +232,7 @@ Current dataset statistics:
 
 ---
 
-# 🧪 Example Queries
+# Example Queries
 
 ### Object / Action Retrieval
 
@@ -303,7 +274,7 @@ How many times were hands washed?
 
 ---
 
-# 🛠️ Technologies Used
+# Technologies Used
 
 | Component | Technology |
 |-----------|------------|
@@ -318,7 +289,7 @@ How many times were hands washed?
 
 ---
 
-# 🚀 Future Improvements
+# Future Improvements
 
 - LLM-based query expansion
 - Hybrid visual + caption retrieval
@@ -330,7 +301,7 @@ How many times were hands washed?
 
 ---
 
-# 📌 Motivation
+# Motivation
 
 Human memories are organized around events rather than isolated images.
 
@@ -338,7 +309,7 @@ This project explores how AI systems can transform continuous egocentric video i
 
 ---
 
-# 👤 Author
+# Author
 
 **Sanskriti Jain**
 
